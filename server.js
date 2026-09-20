@@ -2,78 +2,101 @@ const http = require("http");
 const WebSocket = require("ws");
 
 const PORT = process.env.PORT || 10000;
-const UPSTREAM = process.env.UPSTREAM_URL;
+const UPSTREAM_URL = process.env.UPSTREAM_URL;
 
-if (!UPSTREAM) {
-    console.error("UPSTREAM_URL is not set");
-    process.exit(1);
-}
-
-const httpServer = http.createServer((req, res) => {
-    res.writeHead(200, {
-        "Content-Type": "text/plain"
-    });
-
-    res.end("WebSocket proxy running");
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("WebSocket proxy is running");
 });
 
-const wss = new WebSocket.Server({
-    server: httpServer
-});
+const wss = new WebSocket.Server({ server });
 
 wss.on("connection", (client) => {
-    console.log("Client connected");
+  console.log("CLIENT CONNECTED");
 
-    const upstream = new WebSocket(UPSTREAM);
+  if (!UPSTREAM_URL) {
+    console.error("UPSTREAM_URL missing");
+    client.close(1011, "UPSTREAM_URL missing");
+    return;
+  }
 
-    upstream.on("open", () => {
-        console.log("Upstream connected");
-    });
+  const upstream = new WebSocket(UPSTREAM_URL);
 
-    client.on("message", (data, isBinary) => {
-        console.log("CLIENT -> UPSTREAM");
+  // Store messages that arrive before upstream connects
+  const queue = [];
 
-        if (upstream.readyState === WebSocket.OPEN) {
-            upstream.send(data, { binary: isBinary });
-        }
-    });
+  upstream.on("open", () => {
+    console.log("UPSTREAM CONNECTED");
 
-    upstream.on("message", (data, isBinary) => {
-        console.log("UPSTREAM -> CLIENT");
+    // Send queued messages
+    while (queue.length > 0) {
+      const msg = queue.shift();
 
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(data, { binary: isBinary });
-        }
-    });
+      console.log("QUEUED CLIENT → UPSTREAM:", msg.toString());
 
-    client.on("close", () => {
-        console.log("Client closed");
+      if (upstream.readyState === WebSocket.OPEN) {
+        upstream.send(msg);
+      }
+    }
+  });
 
-        if (
-            upstream.readyState === WebSocket.OPEN ||
-            upstream.readyState === WebSocket.CONNECTING
-        ) {
-            upstream.close();
-        }
-    });
+  client.on("message", (data) => {
+    console.log("CLIENT → PROXY:", data.toString());
 
-    upstream.on("close", () => {
-        console.log("Upstream closed");
+    if (upstream.readyState === WebSocket.OPEN) {
+      console.log("PROXY → UPSTREAM:", data.toString());
+      upstream.send(data);
+    } else {
+      console.log("UPSTREAM NOT READY — QUEUING MESSAGE");
+      queue.push(data);
+    }
+  });
 
-        if (client.readyState === WebSocket.OPEN) {
-            client.close();
-        }
-    });
+  upstream.on("message", (data) => {
+    console.log("UPSTREAM → PROXY:", data.toString());
 
-    client.on("error", err => {
-        console.error("Client error:", err.message);
-    });
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(data);
+      console.log("PROXY → CLIENT:", data.toString());
+    }
+  });
 
-    upstream.on("error", err => {
-        console.error("Upstream error:", err.message);
-    });
+  upstream.on("error", (err) => {
+    console.error("UPSTREAM ERROR:", err.message);
+  });
+
+  upstream.on("close", (code, reason) => {
+    console.log(
+      "UPSTREAM CLOSED:",
+      code,
+      reason.toString()
+    );
+
+    if (client.readyState === WebSocket.OPEN) {
+      client.close();
+    }
+  });
+
+  client.on("close", (code, reason) => {
+    console.log(
+      "CLIENT CLOSED:",
+      code,
+      reason.toString()
+    );
+
+    if (
+      upstream.readyState === WebSocket.OPEN ||
+      upstream.readyState === WebSocket.CONNECTING
+    ) {
+      upstream.close();
+    }
+  });
+
+  client.on("error", (err) => {
+    console.error("CLIENT ERROR:", err.message);
+  });
 });
 
-httpServer.listen(PORT, "0.0.0.0", () => {
-    console.log(`Listening on port ${PORT}`);
+server.listen(PORT, () => {
+  console.log(`Server listening on ${PORT}`);
 });
